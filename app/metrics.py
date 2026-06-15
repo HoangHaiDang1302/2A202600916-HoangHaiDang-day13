@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from statistics import mean
+import time
 
 REQUEST_LATENCIES: list[int] = []
 REQUEST_COSTS: list[float] = []
@@ -10,6 +11,8 @@ REQUEST_TOKENS_OUT: list[int] = []
 ERRORS: Counter[str] = Counter()
 TRAFFIC: int = 0
 QUALITY_SCORES: list[float] = []
+HISTORY: list[dict] = []
+MAX_HISTORY_LEN = 100
 
 
 def record_request(latency_ms: int, cost_usd: float, tokens_in: int, tokens_out: int, quality_score: float) -> None:
@@ -20,6 +23,16 @@ def record_request(latency_ms: int, cost_usd: float, tokens_in: int, tokens_out:
     REQUEST_TOKENS_IN.append(tokens_in)
     REQUEST_TOKENS_OUT.append(tokens_out)
     QUALITY_SCORES.append(quality_score)
+    HISTORY.append({
+        "ts": time.time(),
+        "latency_ms": latency_ms,
+        "cost_usd": cost_usd,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "quality_score": quality_score,
+    })
+    if len(HISTORY) > MAX_HISTORY_LEN:
+        HISTORY.pop(0)
 
 
 
@@ -49,4 +62,5 @@ def snapshot() -> dict:
         "tokens_out_total": sum(REQUEST_TOKENS_OUT),
         "error_breakdown": dict(ERRORS),
         "quality_avg": round(mean(QUALITY_SCORES), 4) if QUALITY_SCORES else 0.0,
+        "history": HISTORY,
     }

@@ -7,7 +7,10 @@ from . import metrics
 from .mock_llm import FakeLLM
 from .mock_rag import retrieve
 from .pii import hash_user_id, summarize_text
+from .logging_config import get_logger
 from .tracing import langfuse_context, observe
+
+log = get_logger()
 
 
 @dataclass
@@ -25,24 +28,41 @@ class LabAgent:
         self.model = model
         self.llm = FakeLLM(model=model)
 
-    @observe()
+    @observe(name="chat-pipeline")
     def run(self, user_id: str, feature: str, session_id: str, message: str) -> AgentResult:
         started = time.perf_counter()
-        docs = retrieve(message)
+        
+        # Error resilience for tool failures
+        try:
+            docs = retrieve(message)
+        except Exception as e:
+            metrics.record_error("RetrievalError")
+            log.warning("retrieval_failed_degraded_state", service="agent", error=str(e))
+            docs = ["Fallback: Retrieval database timeout. Using system default domain answers."]
+
+        # FinOps model routing cost optimization
+        selected_model = self.model
+        if feature == "summary":
+            selected_model = "claude-haiku-3-5"
+
+        llm = FakeLLM(model=selected_model)
         prompt = f"Feature={feature}\nDocs={docs}\nQuestion={message}"
-        response = self.llm.generate(prompt)
+        response = llm.generate(prompt)
+        
         quality_score = self._heuristic_quality(message, response.text, docs)
         latency_ms = int((time.perf_counter() - started) * 1000)
-        cost_usd = self._estimate_cost(response.usage.input_tokens, response.usage.output_tokens)
+        cost_usd = self._estimate_cost(response.usage.input_tokens, response.usage.output_tokens, selected_model)
 
         langfuse_context.update_current_trace(
+            name="chat-pipeline",
             user_id=hash_user_id(user_id),
             session_id=session_id,
-            tags=["lab", feature, self.model],
+            tags=["lab", feature, selected_model],
+            input=message,
+            output=response.text,
         )
         langfuse_context.update_current_observation(
             metadata={"doc_count": len(docs), "query_preview": summarize_text(message)},
-            usage_details={"input": response.usage.input_tokens, "output": response.usage.output_tokens},
         )
 
         metrics.record_request(
@@ -62,9 +82,13 @@ class LabAgent:
             quality_score=quality_score,
         )
 
-    def _estimate_cost(self, tokens_in: int, tokens_out: int) -> float:
-        input_cost = (tokens_in / 1_000_000) * 3
-        output_cost = (tokens_out / 1_000_000) * 15
+    def _estimate_cost(self, tokens_in: int, tokens_out: int, model: str) -> float:
+        if model == "claude-haiku-3-5":
+            input_cost = (tokens_in / 1_000_000) * 0.8
+            output_cost = (tokens_out / 1_000_000) * 4.0
+        else:
+            input_cost = (tokens_in / 1_000_000) * 3
+            output_cost = (tokens_out / 1_000_000) * 15
         return round(input_cost + output_cost, 6)
 
     def _heuristic_quality(self, question: str, answer: str, docs: list[str]) -> float:
